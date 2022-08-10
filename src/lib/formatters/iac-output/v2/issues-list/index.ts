@@ -37,6 +37,13 @@ export function getIacDisplayedIssues(
         `${capitalize(severity)} Severity Issues: ${severityResults.length}`,
       );
 
+      console.log(
+        JSON.stringify(
+          severityResults.filter((result) => !result.targetFile),
+          null,
+          3,
+        ),
+      );
       const issuesOutput = severityResults
         .sort(
           (severityResult1, severityResult2) =>
