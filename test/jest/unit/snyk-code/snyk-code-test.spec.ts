@@ -1,9 +1,15 @@
+import * as os from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
 import stripAnsi from 'strip-ansi';
 import { analyzeFolders, AnalysisSeverity } from '@snyk/code-client';
+import { makeRequest } from '../../../../src/lib/request';
+
 jest.mock('@snyk/code-client');
+jest.mock('../../../../src/lib/request');
+
 const analyzeFoldersMock = analyzeFolders as jest.Mock;
+const makeRequestMock = makeRequest as jest.Mock;
 
 import { loadJson } from '../../../utils';
 import * as checks from '../../../../src/lib/plugins/sast/checks';
@@ -12,34 +18,34 @@ import * as analysis from '../../../../src/lib/plugins/sast/analysis';
 import { Options, TestOptions } from '../../../../src/lib/types';
 import * as ecosystems from '../../../../src/lib/ecosystems';
 import * as analytics from '../../../../src/lib/analytics';
-import snykTest from '../../../../src/cli/commands/test/';
+import snykTest from '../../../../src/cli/commands/test';
 import { jsonStringifyLargeObject } from '../../../../src/lib/json';
 import { ArgsOptions } from '../../../../src/cli/args';
 import * as codeConfig from '../../../../src/lib/code-config';
+import { NeedleResponse } from 'needle';
 
-const { getCodeAnalysisAndParseResults } = analysis;
-import * as os from 'os';
+const { getCodeTestResults } = analysis;
 
 describe('Test snyk code', () => {
   let apiUserConfig;
   let isSastEnabledForOrgSpy;
   let trackUsageSpy;
+
   const failedCodeTestMessage = "Failed to run 'code test'";
   const fakeApiKey = '123456789';
   const baseURL = codeConfig.getCodeClientProxyUrl();
   const LCEbaseURL = 'https://my-proxy-server';
+
+  const fixturePath = path.join(__dirname, '../../../fixtures/sast');
+
   const sampleSarifResponse = loadJson(
-    path.join(__dirname, '/../../../fixtures/sast/sample-sarif.json'),
+    path.join(fixturePath, 'sample-sarif.json'),
   );
   const sampleAnalyzeFoldersResponse = loadJson(
-    path.join(
-      __dirname,
-      '/../../../fixtures/sast/sample-analyze-folders-response.json',
-    ),
+    path.join(fixturePath, 'sample-analyze-folders-response.json'),
   );
 
   const isWindows = os.platform().indexOf('win') === 0;
-  const fixturePath = path.join(__dirname, '../../../fixtures', 'sast');
   const cwd = process.cwd();
 
   function readFixture(filename: string) {
@@ -65,6 +71,7 @@ describe('Test snyk code', () => {
   });
 
   afterEach(() => {
+    delete process.env.SNYK_OAUTH_TOKEN;
     jest.resetAllMocks();
   });
 
@@ -84,6 +91,37 @@ describe('Test snyk code', () => {
       }),
     ).rejects.toThrowError(
       /Authentication failed. Please check the API token on/,
+    );
+  });
+
+  it('should use oauth token for auth if provided', async () => {
+    const oauthToken = 'oauth-token';
+    process.env.SNYK_OAUTH_TOKEN = oauthToken;
+
+    const sastSettings = {
+      sastEnabled: true,
+      localCodeEngine: {
+        url: '',
+        allowCloudUpload: true,
+        enabled: false,
+      },
+    };
+
+    const analyzeFoldersSpy = analyzeFoldersMock.mockResolvedValue(
+      sampleAnalyzeFoldersResponse,
+    );
+    await getCodeTestResults(
+      '.',
+      {
+        path: '',
+        code: true,
+      },
+      sastSettings,
+      'test-id',
+    );
+
+    expect(analyzeFoldersSpy.mock.calls[0][0].connection.sessionToken).toEqual(
+      `Bearer ${oauthToken}`,
     );
   });
 
@@ -178,7 +216,10 @@ describe('Test snyk code', () => {
   });
 
   it('should throw error when response code is not 200', async () => {
-    const error = { code: 401, message: 'Invalid auth token' };
+    const error = {
+      code: 401,
+      message: 'Invalid auth token',
+    };
     isSastEnabledForOrgSpy.mockRejectedValue(error);
 
     const expected = new Error(error.message);
@@ -194,7 +235,10 @@ describe('Test snyk code', () => {
   });
 
   it('should throw error correctly from outside of ecosystem flow when response code is not 200', async () => {
-    const error = { code: 401, message: 'Invalid auth token' };
+    const error = {
+      code: 401,
+      message: 'Invalid auth token',
+    };
     isSastEnabledForOrgSpy.mockRejectedValue(error);
 
     const expected = new Error(error.message);
@@ -220,7 +264,11 @@ describe('Test snyk code', () => {
     });
 
     await expect(
-      snykTest('some/path', { code: true, _: [], _doubleDashArgs: [] }),
+      snykTest('some/path', {
+        code: true,
+        _: [],
+        _doubleDashArgs: [],
+      }),
     ).rejects.toHaveProperty(
       'userMessage',
       'Snyk Code is not supported for org: enable in Settings > Snyk Code',
@@ -234,7 +282,11 @@ describe('Test snyk code', () => {
     });
 
     await expect(
-      snykTest('some/path', { code: true, _: [], _doubleDashArgs: [] }),
+      snykTest('some/path', {
+        code: true,
+        _: [],
+        _doubleDashArgs: [],
+      }),
     ).rejects.toHaveProperty('userMessage', 'error from api: org not found');
   });
 
@@ -251,7 +303,11 @@ describe('Test snyk code', () => {
     });
 
     await expect(
-      snykTest('some/path', { code: true, _: [], _doubleDashArgs: [] }),
+      snykTest('some/path', {
+        code: true,
+        _: [],
+        _doubleDashArgs: [],
+      }),
     ).rejects.toHaveProperty('userMessage', 'Test limit reached!');
   });
 
@@ -259,17 +315,26 @@ describe('Test snyk code', () => {
     {
       name:
         'should write only sarif result to file when only `--sarif-file-output` is used',
-      options: { 'sarif-file-output': true, 'json-file-output': false },
+      options: {
+        'sarif-file-output': true,
+        'json-file-output': false,
+      },
     },
     {
       name:
         'should write only json result to file when only `--json-file-output` is used',
-      options: { 'sarif-file-output': false, 'json-file-output': true },
+      options: {
+        'sarif-file-output': false,
+        'json-file-output': true,
+      },
     },
     {
       name:
         'should write sarif and json results to file when `--sarif-file-output` and `--json-file-output` are used',
-      options: { 'sarif-file-output': true, 'json-file-output': true },
+      options: {
+        'sarif-file-output': true,
+        'json-file-output': true,
+      },
     },
   ])('$name', async (args) => {
     const options: ArgsOptions = {
@@ -451,7 +516,6 @@ describe('Test snyk code', () => {
         analysisContext: {
           flow: 'snyk-cli',
           initiator: 'CLI',
-          orgDisplayName: 'defaultOrg',
           projectName: undefined,
           org: {
             displayName: 'unknown',
@@ -459,6 +523,7 @@ describe('Test snyk code', () => {
             name: 'defaultOrg',
             publicId: 'unknown',
           },
+          project: expect.any(Object),
         },
         analysisOptions: expect.any(Object),
         connection: expect.any(Object),
@@ -623,7 +688,7 @@ describe('Test snyk code', () => {
         apiName: '/some-api',
       };
       jest
-        .spyOn(analysis, 'getCodeAnalysisAndParseResults')
+        .spyOn(analysis, 'getCodeTestResults')
         .mockRejectedValue(codeClientError);
       isSastEnabledForOrgSpy.mockResolvedValueOnce({
         sastEnabled: true,
@@ -650,7 +715,7 @@ describe('Test snyk code', () => {
     };
 
     jest
-      .spyOn(analysis, 'getCodeAnalysisAndParseResults')
+      .spyOn(analysis, 'getCodeTestResults')
       .mockRejectedValue(codeClientError);
 
     isSastEnabledForOrgSpy.mockResolvedValueOnce({
@@ -671,7 +736,7 @@ describe('Test snyk code', () => {
 
   it('analyzeFolders should be called with the right arguments', async () => {
     const baseURL = expect.any(String);
-    const sessionToken = expect.any(String);
+    const sessionToken = `token ${fakeApiKey}`;
     const source = expect.any(String);
     const severity = AnalysisSeverity.info;
     const paths: string[] = ['.'];
@@ -690,22 +755,26 @@ describe('Test snyk code', () => {
       analysisContext: {
         flow: 'snyk-cli',
         initiator: 'CLI',
-        org: expect.anything(),
-        orgDisplayName: undefined,
+        org: expect.any(Object),
         projectName: undefined,
+        project: expect.any(Object),
       },
       languages: undefined,
     };
 
     const sastSettings = {
       sastEnabled: true,
-      localCodeEngine: { url: '', allowCloudUpload: true, enabled: false },
+      localCodeEngine: {
+        url: '',
+        allowCloudUpload: true,
+        enabled: false,
+      },
     };
 
     const analyzeFoldersSpy = analyzeFoldersMock.mockResolvedValue(
       sampleAnalyzeFoldersResponse,
     );
-    await getCodeAnalysisAndParseResults(
+    await getCodeTestResults(
       '.',
       {
         path: '',
@@ -721,11 +790,15 @@ describe('Test snyk code', () => {
   it('analyzeFolders should return the right sarif response', async () => {
     const sastSettings = {
       sastEnabled: true,
-      localCodeEngine: { url: '', allowCloudUpload: true, enabled: false },
+      localCodeEngine: {
+        url: '',
+        allowCloudUpload: true,
+        enabled: false,
+      },
     };
 
     analyzeFoldersMock.mockResolvedValue(sampleAnalyzeFoldersResponse);
-    const actual = await getCodeAnalysisAndParseResults(
+    const actual = await getCodeTestResults(
       '.',
       {
         path: '',
@@ -735,7 +808,7 @@ describe('Test snyk code', () => {
       'test-id',
     );
 
-    expect(actual).toEqual(sampleSarifResponse);
+    expect(actual?.analysisResults.sarif).toEqual(sampleSarifResponse);
   });
 
   it.each([
@@ -785,9 +858,9 @@ describe('Test snyk code', () => {
         analysisContext: {
           flow: 'snyk-cli',
           initiator: 'CLI',
-          org: expect.anything(),
-          orgDisplayName: undefined,
+          org: expect.any(Object),
           projectName: undefined,
+          project: expect.any(Object),
         },
         languages: undefined,
       };
@@ -795,7 +868,7 @@ describe('Test snyk code', () => {
       const analyzeFoldersSpy = analyzeFoldersMock.mockResolvedValue(
         sampleAnalyzeFoldersResponse,
       );
-      await getCodeAnalysisAndParseResults(
+      await getCodeTestResults(
         '.',
         {
           path: '',
@@ -822,7 +895,7 @@ describe('Test snyk code', () => {
     const analyzeFoldersSpy = analyzeFoldersMock.mockResolvedValue(
       sampleAnalyzeFoldersResponse,
     );
-    await getCodeAnalysisAndParseResults(
+    await getCodeTestResults(
       '.',
       {
         path: '',
@@ -837,25 +910,72 @@ describe('Test snyk code', () => {
     );
   });
 
-  it('Local code engine - should throw error, when enabled and url is missing', async () => {
+  it('Local code engine - makes GET /status to get SCLE version', async () => {
     const sastSettings = {
       sastEnabled: true,
-      localCodeEngine: { url: '', allowCloudUpload: true, enabled: true },
+      localCodeEngine: {
+        url: 'http://foo.bar',
+        allowCloudUpload: true,
+        enabled: true,
+      },
+    };
+    await getCodeTestResults(
+      '.',
+      {
+        path: '',
+        code: true,
+        debug: true,
+      },
+      sastSettings,
+      'test-id',
+    );
+
+    const firstArgumentOfMakeRequest = makeRequestMock.mock.calls[0][0];
+    expect(firstArgumentOfMakeRequest).toEqual({
+      method: 'get',
+      url: 'http://foo.bar/status',
+    });
+  });
+
+  it('Local Code Engine - Scans are not interrupted if /status call fails', async () => {
+    // This test `analyzeFolder` if `/status` call throws.
+
+    makeRequestMock.mockImplementationOnce(() => {
+      return Promise.reject({
+        res: { statusCode: 555 } as NeedleResponse,
+      });
+    });
+
+    const sastSettings = {
+      sastEnabled: true,
+      localCodeEngine: {
+        url: 'http://local-engine/api',
+        allowCloudUpload: false,
+        enabled: true,
+      },
     };
 
-    await expect(
-      getCodeAnalysisAndParseResults(
-        '.',
-        {
-          path: '',
-          code: true,
-        },
-        sastSettings,
-        'test-id',
-      ),
-    ).rejects.toThrowError(
-      'Missing configuration for Snyk Code Local Engine. Refer to our docs on https://docs.snyk.io/products/snyk-code/deployment-options/snyk-code-local-engine/cli-and-ide to learn more',
+    const analyzeFoldersSpy = analyzeFoldersMock.mockResolvedValue(
+      sampleAnalyzeFoldersResponse,
     );
+    await getCodeTestResults(
+      '.',
+      {
+        path: '',
+        code: true,
+        debug: true,
+      },
+      sastSettings,
+      'test-id',
+    );
+    const statusCalledWith = makeRequestMock.mock.calls[0][0];
+    expect(statusCalledWith).toEqual({
+      method: 'get',
+      url: 'http://local-engine/status',
+    });
+
+    // if /status call throws are unhandled, `analyzeFolder` is never called
+    expect(analyzeFoldersSpy).toHaveBeenCalled();
   });
 });
 

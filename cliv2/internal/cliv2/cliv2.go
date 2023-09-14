@@ -14,11 +14,14 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/gofrs/flock"
+	"github.com/snyk/go-application-framework/pkg/utils"
+
 	"github.com/snyk/cli/cliv2/internal/constants"
 	"github.com/snyk/cli/cliv2/internal/embedded"
 	"github.com/snyk/cli/cliv2/internal/embedded/cliv1"
 	"github.com/snyk/cli/cliv2/internal/proxy"
-	"github.com/snyk/go-application-framework/pkg/utils"
+	local_utils "github.com/snyk/cli/cliv2/internal/utils"
 )
 
 type Handler int
@@ -26,10 +29,12 @@ type Handler int
 type CLI struct {
 	DebugLogger      *log.Logger
 	CacheDirectory   string
+	WorkingDirectory string
 	v1BinaryLocation string
 	stdin            io.Reader
 	stdout           io.Writer
 	stderr           io.Writer
+	env              []string
 }
 
 type EnvironmentWarning struct {
@@ -42,11 +47,7 @@ const (
 	V2_ABOUT   Handler = iota
 )
 
-//go:embed cliv2.version
-var version_prefix string
-
 func NewCLIv2(cacheDirectory string, debugLogger *log.Logger) (*CLI, error) {
-
 	v1BinaryLocation, err := cliv1.GetFullCLIV1TargetPath(cacheDirectory)
 	if err != nil {
 		fmt.Println(err)
@@ -56,21 +57,64 @@ func NewCLIv2(cacheDirectory string, debugLogger *log.Logger) (*CLI, error) {
 	cli := CLI{
 		DebugLogger:      debugLogger,
 		CacheDirectory:   cacheDirectory,
+		WorkingDirectory: "",
 		v1BinaryLocation: v1BinaryLocation,
 		stdin:            os.Stdin,
 		stdout:           os.Stdout,
 		stderr:           os.Stderr,
-	}
-
-	cli.ClearCache()
-
-	err = cli.ExtractV1Binary()
-	if err != nil {
-		fmt.Println(err)
-		return nil, err
+		env:              os.Environ(),
 	}
 
 	return &cli, nil
+}
+
+func (c *CLI) Init() (err error) {
+	c.DebugLogger.Println("Init start")
+
+	if len(c.CacheDirectory) > 0 {
+		// ensure the specified base cache directory exists, this needs to be done even before acquiring the lock
+		if _, err = os.Stat(c.CacheDirectory); os.IsNotExist(err) {
+			err = os.MkdirAll(c.CacheDirectory, local_utils.CACHEDIR_PERMISSION)
+			if err != nil {
+				return fmt.Errorf("Cache directory path is invalid: %w", err)
+			}
+		}
+	}
+
+	// use filelock to synchronize parallel executed processes
+	lockFileName := path.Join(c.CacheDirectory, GetFullVersion()+".lock")
+	fileLock := flock.New(lockFileName)
+	err = fileLock.Lock()
+	if err != nil {
+		return err
+	}
+
+	unlock := func() {
+		_ = fileLock.Unlock()
+		_ = os.Remove(lockFileName)
+	}
+	defer unlock()
+
+	c.DebugLogger.Printf("Init-Lock acquired: %v (%s)\n", fileLock.Locked(), lockFileName)
+
+	// create required cache and temp directories
+	err = local_utils.CreateAllDirectories(c.CacheDirectory, GetFullVersion())
+	if err != nil {
+		return err
+	}
+
+	// cleanup cache a bit
+	_ = c.ClearCache()
+
+	// extract cliv1
+	err = c.ExtractV1Binary()
+	if err != nil {
+		return err
+	}
+
+	c.DebugLogger.Println("Init end")
+
+	return err
 }
 
 func (c *CLI) ClearCache() error {
@@ -83,16 +127,18 @@ func (c *CLI) ClearCache() error {
 	// Get current version binary's path
 	v1BinaryPath := path.Dir(c.v1BinaryLocation)
 	var maxVersionToDelete = 5
-	for i, file := range fileInfo {
+	var deleteCount = 0
+	for _, file := range fileInfo {
 		currentPath := path.Join(c.CacheDirectory, file.Name())
-		if currentPath != v1BinaryPath {
+		if currentPath != v1BinaryPath && !strings.Contains(currentPath, ".lock") {
+			deleteCount++
 			err = os.RemoveAll(currentPath)
 			if err != nil {
 				c.DebugLogger.Println("Error deleting an old version directory: ", currentPath)
 			}
 		}
 		// Stop the loop after 5 deletions to not create too much overhead
-		if i == maxVersionToDelete {
+		if deleteCount == maxVersionToDelete {
 			break
 		}
 	}
@@ -100,12 +146,16 @@ func (c *CLI) ClearCache() error {
 	return nil
 }
 
+func (c *CLI) AppendEnvironmentVariables(env []string) {
+	c.env = append(c.env, env...)
+}
+
 func (c *CLI) ExtractV1Binary() error {
 	cliV1ExpectedSHA256 := cliv1.ExpectedSHA256()
 
 	isValid, err := embedded.ValidateFile(c.v1BinaryLocation, cliV1ExpectedSHA256, c.DebugLogger)
 	if err != nil || !isValid {
-		c.DebugLogger.Println("cliv1 is not valid, start extracting ", c.v1BinaryLocation)
+		c.DebugLogger.Println("Extract cliv1 to", c.v1BinaryLocation)
 
 		err = cliv1.ExtractTo(c.v1BinaryLocation)
 		if err != nil {
@@ -118,13 +168,13 @@ func (c *CLI) ExtractV1Binary() error {
 		}
 
 		if isValid {
-			c.DebugLogger.Println("cliv1 is valid after extracting", c.v1BinaryLocation)
+			c.DebugLogger.Println("Extracted cliv1 successfully")
 		} else {
-			fmt.Println("cliv1 is not valid after sha256 check")
-			return err
+			c.DebugLogger.Println("Extracted cliv1 is not valid")
+			return fmt.Errorf("failed to extract legacy cli")
 		}
 	} else {
-		c.DebugLogger.Println("cliv1 already exists and is valid at", c.v1BinaryLocation)
+		c.DebugLogger.Println("Extraction not required")
 	}
 
 	return nil
@@ -132,13 +182,7 @@ func (c *CLI) ExtractV1Binary() error {
 
 func GetFullVersion() string {
 	v1Version := cliv1.CLIV1Version()
-	v2Version := strings.TrimSpace(version_prefix)
-
-	if len(v2Version) > 0 {
-		return v2Version + "." + v1Version
-	} else {
-		return v1Version
-	}
+	return v1Version
 }
 
 func (c *CLI) GetIntegrationName() string {
@@ -150,7 +194,7 @@ func (c *CLI) GetBinaryLocation() string {
 }
 
 func (c *CLI) printVersion() {
-	fmt.Println(GetFullVersion())
+	fmt.Fprintln(c.stdout, GetFullVersion())
 }
 
 func (c *CLI) commandVersion(passthroughArgs []string) error {
@@ -169,14 +213,14 @@ func (c *CLI) commandAbout(proxyInfo *proxy.ProxyInfo, passthroughArgs []string)
 		return err
 	}
 
-	separator := "\n+-+-+-+-+-+-+\n\n"
+	const separator = "\n+-+-+-+-+-+-+\n\n\n"
 
 	allEmbeddedFiles := embedded.ListFiles()
 	for i := range allEmbeddedFiles {
 		f := &allEmbeddedFiles[i]
-		path := f.Path()
+		fPath := f.Path()
 
-		if strings.Contains(path, "licenses") {
+		if strings.Contains(fPath, "licenses") {
 			size := f.Size()
 			data := make([]byte, size)
 			_, err := f.Read(data)
@@ -184,9 +228,9 @@ func (c *CLI) commandAbout(proxyInfo *proxy.ProxyInfo, passthroughArgs []string)
 				continue
 			}
 
-			fmt.Printf("Package: %s \n", strings.ReplaceAll(strings.ReplaceAll(path, "/licenses/", ""), "/"+f.Name(), ""))
-			fmt.Println(string(data))
-			fmt.Println(separator)
+			fmt.Printf("Package: %s \n", strings.ReplaceAll(strings.ReplaceAll(fPath, "/licenses/", ""), "/"+f.Name(), ""))
+			fmt.Fprintln(c.stdout, string(data))
+			fmt.Fprint(c.stdout, separator)
 		}
 	}
 
@@ -200,14 +244,21 @@ func determineHandler(passthroughArgs []string) Handler {
 		utils.Contains(passthroughArgs, "-v") ||
 		utils.Contains(passthroughArgs, "version") {
 		result = V2_VERSION
-	} else if utils.Contains(passthroughArgs, "--about") {
+	} else if utils.Contains(passthroughArgs, "--about") ||
+		utils.Contains(passthroughArgs, "about") {
 		result = V2_ABOUT
 	}
 
 	return result
 }
 
-func PrepareV1EnvironmentVariables(input []string, integrationName string, integrationVersion string, proxyAddress string, caCertificateLocation string) (result []string, err error) {
+func PrepareV1EnvironmentVariables(
+	input []string,
+	integrationName string,
+	integrationVersion string,
+	proxyAddress string,
+	caCertificateLocation string,
+) (result []string, err error) {
 
 	inputAsMap := utils.ToKeyValueMap(input, "=")
 	result = input
@@ -268,30 +319,33 @@ func PrepareV1EnvironmentVariables(input []string, integrationName string, integ
 
 }
 
-func PrepareV1Command(cmd string, args []string, proxyInfo *proxy.ProxyInfo, integrationName string, integrationVersion string) (snykCmd *exec.Cmd, err error) {
+func (c *CLI) PrepareV1Command(
+	cmd string,
+	args []string,
+	proxyInfo *proxy.ProxyInfo,
+	integrationName string,
+	integrationVersion string,
+) (snykCmd *exec.Cmd, err error) {
 	proxyAddress := fmt.Sprintf("http://%s:%s@127.0.0.1:%d", proxy.PROXY_USERNAME, proxyInfo.Password, proxyInfo.Port)
 
 	snykCmd = exec.Command(cmd, args...)
-	snykCmd.Env, err = PrepareV1EnvironmentVariables(os.Environ(), integrationName, integrationVersion, proxyAddress, proxyInfo.CertificateLocation)
+	snykCmd.Env, err = PrepareV1EnvironmentVariables(c.env, integrationName, integrationVersion, proxyAddress, proxyInfo.CertificateLocation)
+
+	if len(c.WorkingDirectory) > 0 {
+		snykCmd.Dir = c.WorkingDirectory
+	}
 
 	return snykCmd, err
 }
 
-func (c *CLI) executeV1Default(proxyInfo *proxy.ProxyInfo, passthroughArgs []string) error {
-
-	snykCmd, err := PrepareV1Command(
-		c.v1BinaryLocation,
-		passthroughArgs,
-		proxyInfo,
-		c.GetIntegrationName(),
-		GetFullVersion(),
-	)
+func (c *CLI) executeV1Default(proxyInfo *proxy.ProxyInfo, passThroughArgs []string) error {
+	snykCmd, err := c.PrepareV1Command(c.v1BinaryLocation, passThroughArgs, proxyInfo, c.GetIntegrationName(), GetFullVersion())
 
 	if c.DebugLogger.Writer() != io.Discard {
 		c.DebugLogger.Println("Launching: ")
 		c.DebugLogger.Println("  ", c.v1BinaryLocation)
 		c.DebugLogger.Println(" With Arguments:")
-		c.DebugLogger.Println("  ", strings.Join(passthroughArgs, ", "))
+		c.DebugLogger.Println("  ", strings.Join(passThroughArgs, ", "))
 		c.DebugLogger.Println(" With Environment: ")
 
 		variablesMap := utils.ToKeyValueMap(snykCmd.Env, "=")
@@ -303,6 +357,7 @@ func (c *CLI) executeV1Default(proxyInfo *proxy.ProxyInfo, passthroughArgs []str
 			constants.SNYK_HTTPS_PROXY_ENV_SYSTEM,
 			constants.SNYK_HTTP_PROXY_ENV_SYSTEM,
 			constants.SNYK_HTTP_NO_PROXY_ENV_SYSTEM,
+			constants.SNYK_ANALYTICS_DISABLED_ENV,
 		}
 
 		for _, key := range listedEnvironmentVariables {
@@ -317,7 +372,7 @@ func (c *CLI) executeV1Default(proxyInfo *proxy.ProxyInfo, passthroughArgs []str
 
 	if err != nil {
 		if evWarning, ok := err.(EnvironmentWarning); ok {
-			fmt.Println("WARNING! ", evWarning)
+			fmt.Fprintln(c.stdout, "WARNING! ", evWarning)
 		}
 	}
 
@@ -326,17 +381,17 @@ func (c *CLI) executeV1Default(proxyInfo *proxy.ProxyInfo, passthroughArgs []str
 	return err
 }
 
-func (c *CLI) Execute(proxyInfo *proxy.ProxyInfo, passthroughArgs []string) error {
+func (c *CLI) Execute(proxyInfo *proxy.ProxyInfo, passThroughArgs []string) error {
 	var err error
-	handler := determineHandler(passthroughArgs)
+	handler := determineHandler(passThroughArgs)
 
 	switch {
 	case handler == V2_VERSION:
-		err = c.commandVersion(passthroughArgs)
+		err = c.commandVersion(passThroughArgs)
 	case handler == V2_ABOUT:
-		err = c.commandAbout(proxyInfo, passthroughArgs)
+		err = c.commandAbout(proxyInfo, passThroughArgs)
 	default:
-		err = c.executeV1Default(proxyInfo, passthroughArgs)
+		err = c.executeV1Default(proxyInfo, passThroughArgs)
 	}
 
 	return err

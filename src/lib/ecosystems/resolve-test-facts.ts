@@ -1,3 +1,4 @@
+import { AuthFailedError } from '../errors';
 import { Options, PolicyOptions } from '../types';
 import { spinner } from '../../lib/spinner';
 import {
@@ -23,12 +24,11 @@ import { extractAndApplyPluginAnalytics } from './plugin-analytics';
 import { findAndLoadPolicy } from '../policy';
 import { filterIgnoredIssues } from './policy';
 import { IssueDataUnmanaged, Issue } from '../snyk-test/legacy';
-import { hasFeatureFlag } from '../feature-flags';
 import {
   convertDepGraph,
   convertMapCasing,
   convertToCamelCase,
-  getSelf,
+  getOrg,
 } from './unmanaged/utils';
 import { sleep } from '../common';
 import { SEVERITY } from '../snyk-test/common';
@@ -40,23 +40,23 @@ export async function resolveAndTestFacts(
   },
   options: Options & PolicyOptions,
 ): Promise<[TestResult[], string[]]> {
-  const unmanagedDepsOverride = process.env.USE_UNMANAGED_DEPS;
+  try {
+    return await resolveAndTestFactsUnmanagedDeps(scans, options);
+  } catch (error) {
+    const unauthorized = error.code === 401 || error.code === 403;
 
-  const featureFlagEnabled = await hasFeatureFlag(
-    'snykNewUnmanagedTest',
-    options,
-  );
+    if (unauthorized) {
+      throw AuthFailedError(
+        'Unauthorized request to unmanaged service',
+        error.code,
+      );
+    }
 
-  return featureFlagEnabled || unmanagedDepsOverride?.toLowerCase() === 'true'
-    ? resolveAndTestFactsUnmanagedDeps(scans, options)
-    : resolveAndTestFactsRegistry(ecosystem, scans, options);
+    throw error;
+  }
 }
 
-async function getOrgDefaultContext(): Promise<string> {
-  return (await getSelf())?.data.attributes.default_org_context;
-}
-
-async function submitHashes(
+export async function submitHashes(
   hashes: FileHashes,
   orgId: string,
 ): Promise<string> {
@@ -65,7 +65,7 @@ async function submitHashes(
   return response.data.id;
 }
 
-async function pollDepGraphAttributes(
+export async function pollDepGraphAttributes(
   id: string,
   orgId: string,
 ): Promise<Attributes> {
@@ -158,7 +158,7 @@ export async function resolveAndTestFactsUnmanagedDeps(
   const packageManager = 'Unmanaged (C/C++)';
   const displayTargetFile = '';
 
-  const orgId = options.org || (await getOrgDefaultContext()) || '';
+  const orgId = await getOrg(options.org);
   const target_severity: SEVERITY = options.severityThreshold || SEVERITY.LOW;
 
   if (orgId === '') {
@@ -271,6 +271,7 @@ export async function resolveAndTestFactsUnmanagedDeps(
   return [results, errors];
 }
 
+// resolveAndTestFactsRegistry has been deprecated, and will be removed in upcoming release.
 export async function resolveAndTestFactsRegistry(
   ecosystem: Ecosystem,
   scans: {

@@ -5,6 +5,7 @@ import {
   getRestApiUrl,
   getV1ApiUrl,
   getHiddenApiUrl,
+  getRootUrl,
 } from './api-url';
 
 const DEFAULT_TIMEOUT = 5 * 60; // in seconds
@@ -30,6 +31,7 @@ interface Config {
   DRIFTCTL_URL?: string;
   IAC_BUNDLE_PATH?: string;
   IAC_POLICY_ENGINE_PATH?: string;
+  IAC_RULES_CLIENT_URL?: string;
   PUBLIC_VULN_DB_URL: string;
 }
 
@@ -79,9 +81,7 @@ if (!config.timeout) {
 // this is a bit of an assumption that our web site origin is the same
 // as our API origin, but for now it's okay - RS 2015-10-16
 if (!config.ROOT) {
-  const apiUrl = new URL(config.API);
-  apiUrl.host = apiUrl.host.replace(/^ap[pi]\./, '');
-  config.ROOT = apiUrl.protocol + '//' + apiUrl.host;
+  config.ROOT = getRootUrl(config.API);
 }
 
 config.PUBLIC_VULN_DB_URL = 'https://security.snyk.io';

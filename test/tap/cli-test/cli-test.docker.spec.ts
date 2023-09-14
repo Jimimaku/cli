@@ -65,7 +65,7 @@ export const DockerTests: AcceptanceTests = {
         [
           {
             docker: true,
-            'exclude-app-vulns': true,
+            'exclude-app-vulns': false,
             org: 'explicit-org',
             projectName: null,
             packageManager: null,
@@ -142,7 +142,7 @@ export const DockerTests: AcceptanceTests = {
         [
           {
             docker: true,
-            'exclude-app-vulns': true,
+            'exclude-app-vulns': false,
             org: 'explicit-org',
             projectName: null,
             packageManager: null,
@@ -295,7 +295,7 @@ export const DockerTests: AcceptanceTests = {
           {
             file: 'Dockerfile',
             docker: true,
-            'exclude-app-vulns': true,
+            'exclude-app-vulns': false,
             org: 'explicit-org',
             projectName: null,
             packageManager: null,
@@ -410,7 +410,7 @@ export const DockerTests: AcceptanceTests = {
         [
           {
             docker: true,
-            'exclude-app-vulns': true,
+            'exclude-app-vulns': false,
             org: 'explicit-org',
             projectName: null,
             packageManager: null,
@@ -486,7 +486,7 @@ export const DockerTests: AcceptanceTests = {
         [
           {
             docker: true,
-            'exclude-app-vulns': true,
+            'exclude-app-vulns': false,
             org: 'explicit-org',
             projectName: null,
             packageManager: null,
@@ -568,7 +568,7 @@ export const DockerTests: AcceptanceTests = {
         [
           {
             docker: true,
-            'exclude-app-vulns': true,
+            'exclude-app-vulns': false,
             org: 'explicit-org',
             projectName: null,
             packageManager: null,
@@ -745,13 +745,29 @@ export const DockerTests: AcceptanceTests = {
       }
     },
 
-    '`test --docker --file=Dockerfile --sarif `': (params, utils) => async (
-      t,
-    ) => {
-      const testableObject = await testSarif(t, utils, params, { sarif: true });
+    '`container test alpine --sarif `': (params, utils) => async (t) => {
+      const testableObject = await testSarif(t, utils, params, {
+        sarif: true,
+      });
       const results = JSON.parse(testableObject.message);
       const sarifResults = require(getFixturePath(
         'docker/sarif-container-result.json',
+      ));
+      t.deepEqual(results, sarifResults, 'stdout containing sarif results');
+      t.end();
+    },
+
+    '`container test alpine --file=Dockerfile --sarif `': (
+      params,
+      utils,
+    ) => async (t) => {
+      const testableObject = await testSarif(t, utils, params, {
+        sarif: true,
+        file: 'Dockerfile',
+      });
+      const results = JSON.parse(testableObject.message);
+      const sarifResults = require(getFixturePath(
+        'docker/sarif-with-file-container-result.json',
       ));
       t.deepEqual(results, sarifResults, 'stdout containing sarif results');
       t.end();
@@ -851,7 +867,7 @@ async function testPrep(t, utils, params, additionaLpropsForCli) {
   params.server.setNextResponse(vulns);
 
   try {
-    await params.cli.test('test alpine', {
+    await params.cli.test('alpine', {
       docker: true,
       ...additionaLpropsForCli,
     });

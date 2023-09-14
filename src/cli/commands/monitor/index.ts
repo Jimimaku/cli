@@ -93,9 +93,6 @@ export default async function monitor(...args0: MethodArgs): Promise<any> {
   if (options.docker && options['remote-repo-url']) {
     throw new Error('`--remote-repo-url` is not supported for container scans');
   }
-
-  // TODO remove 'app-vulns' options and warning message once
-  // https://github.com/snyk/cli/pull/3433 is merged
   if (options.docker) {
     // order is important here, we want:
     // 1) exclude-app-vulns set -> no app vulns
@@ -178,7 +175,7 @@ export default async function monitor(...args0: MethodArgs): Promise<any> {
       const unsupportedPackageManagers: Array<{
         label: string;
         name: string;
-      }> = [{ label: 'Swift PM', name: 'swift' }];
+      }> = [];
       const unsupportedPackageManager = unsupportedPackageManagers.find(
         (pm) => pm.name === packageManager,
       );
@@ -283,7 +280,11 @@ export default async function monitor(...args0: MethodArgs): Promise<any> {
           const res: MonitorResult = await promiseOrCleanup(
             snykMonitor(
               path,
-              generateMonitorMeta(options, extractedPackageManager),
+              generateMonitorMeta(
+                options,
+                extractedPackageManager,
+                projectName,
+              ),
               projectDeps,
               options,
               projectDeps.plugin as PluginMetadata,
@@ -349,12 +350,17 @@ export default async function monitor(...args0: MethodArgs): Promise<any> {
   throw new Error(output);
 }
 
-function generateMonitorMeta(options, packageManager?): MonitorMeta {
+function generateMonitorMeta(
+  options,
+  packageManager?,
+  projectName?,
+): MonitorMeta {
   return {
     method: 'cli',
     packageManager,
     'policy-path': options['policy-path'],
-    'project-name': options['project-name'] || config.PROJECT_NAME,
+    'project-name':
+      options['project-name'] || projectName || config.PROJECT_NAME,
     isDocker: !!options.docker,
     prune: !!options.pruneRepeatedSubdependencies,
     'remote-repo-url': options['remote-repo-url'],
